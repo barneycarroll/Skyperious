@@ -8,23 +8,31 @@ Released under the MIT License.
 
 @author      Erki Suurjaak
 @created     13.01.2012
-@modified    24.02.2014
+@modified    13.11.2014
 ------------------------------------------------------------------------------
 """
 import collections
+import cStringIO
 import csv
 import datetime
 import os
 import re
 import traceback
 
-from PIL import ImageFile, ImageFont
+try:
+    from PIL import ImageFile, ImageFont
+except ImportError:
+    ImageFile = ImageFont = None
 try:
     import xlsxwriter
     XLSX_WILDCARD = "Excel workbook (*.xlsx)|*.xlsx|"
 except ImportError:
     xlsxwriter = None
     XLSX_WILDCARD = ""
+try:
+    import wx # Alternative image handler if PIL not installed
+except ImportError:
+    wx = None
 
 from third_party import step
 
@@ -37,10 +45,10 @@ import templates
 import util
 
 try: # Used in measuring text extent for Excel column auto-width.
-    FONT_XLSX = ImageFont.truetype(conf.FontXlsxFile, 15)
-    FONT_XLSX_BOLD = ImageFont.truetype(conf.FontXlsxBoldFile, 15)
+    FONT_XLSX = ImageFont and ImageFont.truetype(conf.FontXlsxFile, 15)
+    FONT_XLSX_BOLD = ImageFont and ImageFont.truetype(conf.FontXlsxBoldFile, 15)
 except IOError:
-    FONT_XLSX = FONT_XLSX_BOLD = ImageFont.load_default()
+    FONT_XLSX = FONT_XLSX_BOLD = ImageFont and ImageFont.load_default()
 
 """FileDialog wildcard strings, matching extensions lists and default names."""
 CHAT_WILDCARD = ("HTML document (*.html)|*.html|Text document (*.txt)|*.txt|"
@@ -83,7 +91,8 @@ def export_chats(chats, path, format, db, messages=None, skip=True, progress=Non
         if len(format) > 4: # Filename already given in format
             filename = os.path.join(path, format)
         else:
-            filename = "Skype %s.%s" % (chat["title_long_lc"], format)
+            args = collections.defaultdict(str); args.update(chat)
+            filename = "%s.%s" % (conf.ExportChatTemplate % args, format)
             filename = os.path.join(path, util.safe_filename(filename))
             filename = util.unique_path(filename)
         return filename
@@ -189,10 +198,14 @@ def export_chat_template(chat, filename, db, messages):
                               "chat_picture_raw": None, })
             if chat["meta_picture"]:
                 raw = skypedata.fix_image_raw(chat["meta_picture"])
-                imgparser = ImageFile.Parser(); imgparser.feed(raw)
-                img = imgparser.close()
-                namespace.update(chat_picture_size=img.size,
-                                 chat_picture_raw=raw)
+                namespace["chat_picture_raw"] = raw
+                if ImageFile:
+                    imgparser = ImageFile.Parser(); imgparser.feed(raw)
+                    img = imgparser.close()
+                    namespace["chat_picture_size"] = img.size
+                elif wx:
+                    img = wx.ImageFromStream(cStringIO.StringIO(raw))
+                    namespace["chat_picture_size"] = tuple(img.GetSize())
             for p in chat["participants"]:
                 contact = p["contact"].copy()
                 namespace["participants"].append(contact)

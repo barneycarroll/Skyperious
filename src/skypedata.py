@@ -8,7 +8,7 @@ Released under the MIT License.
 
 @author      Erki Suurjaak
 @created     26.11.2011
-@modified    02.03.2014
+@modified    13.11.2014
 ------------------------------------------------------------------------------
 """
 import cgi
@@ -31,7 +31,10 @@ import traceback
 import urllib
 import xml.etree.cElementTree
 
-from PIL import Image, ImageFile
+try:
+    from PIL import Image, ImageFile
+except ImportError:
+    Image = ImageFile = None
 try:
     import wx
 except ImportError:
@@ -257,7 +260,7 @@ class SkypeDatabase(object):
             self.id = self.account["skypename"]
         except Exception as e:
             main.log("Error getting account information from %s.\n\n%s",
-                     filename, traceback.format_exc())
+                     self, traceback.format_exc())
 
 
     def register_consumer(self, consumer):
@@ -605,9 +608,9 @@ class SkypeDatabase(object):
                 [i.sort(key=lambda x: (x["contact"].get("name", "")).lower())
                  for i in participants.values()]
                 rows = self.execute(
-                    "SELECT *, COALESCE(displayname, meta_topic, '') AS title, "
-                    "NULL AS created_datetime, "
-                    "NULL AS last_activity_datetime "
+                    "SELECT *, "
+                    "COALESCE(displayname, meta_topic, identity) AS title, "
+                    "NULL AS created_datetime, NULL AS last_activity_datetime "
                     "FROM conversations WHERE displayname IS NOT NULL "
                     "ORDER BY last_activity_timestamp DESC"
                 ).fetchall()
@@ -943,10 +946,10 @@ class SkypeDatabase(object):
     def get_table_columns(self, table):
         """
         Returns the columns of the specified table, as
-        [{"name": "col1", "type": "INTEGER", }, ] or None if not found.
+        [{"name": "col1", "type": "INTEGER", }, ], or [] if not retrievable.
         """
         table = table.lower()
-        table_columns = None
+        table_columns = []
         if self.is_open() and self.tables_list is None:
             self.get_tables()
         if self.is_open() and table in self.tables:
@@ -1497,11 +1500,10 @@ class MessageParser(object):
         if stats:
             self.stats = {"smses": 0, "transfers": [], "calls": 0,
                           "messages": 0, "counts": {}, "total": 0,
-                          "calldurations": 0, "callmaxdurations": 0,
                           "startdate": None, "enddate": None, "wordcloud": [],
                           "cloudtext": "", "links": [], "last_message": "",
                           "chars": 0, "smschars": 0, "files": 0, "bytes": 0,
-                          "info_items": []}
+                          "calldurations": 0, "info_items": []}
 
 
     def parse(self, message, rgx_highlight=None, output=None):
@@ -1845,7 +1847,8 @@ class MessageParser(object):
                         t = "<font color='%s'></font>" % conf.SkypeLinkColour
                         span = xml.etree.cElementTree.fromstring(t)
                         span.text = subelem.text
-                        [(span.append(i), subelem.remove(i)) for i in subelem]
+                        for i in list(subelem):
+                            span.append(i), subelem.remove(i)
                         subelem.text = ""
                         subelem.append(span)
                 index += 1
@@ -1944,7 +1947,7 @@ class MessageParser(object):
                 if identity not in self.stats["counts"]:
                     self.stats["counts"][identity] = author_stats.copy()
                 self.stats["counts"][identity]["calldurations"] += duration
-                self.stats["callmaxdurations"] += duration
+            self.stats["calldurations"] += max(calldurations.values() or [0])
         elif MESSAGES_TYPE_FILE == message["type"]:
             files = message.get("__files")
             if files is None:
@@ -2008,8 +2011,7 @@ class MessageParser(object):
         if not self.stats:
             return {}
         stats = self.stats
-        for k in ["chars", "smschars", "files", "bytes", "calls",
-                  "calldurations"]:
+        for k in ["chars", "smschars", "files", "bytes", "calls"]:
             stats[k] = sum(i[k] for i in stats["counts"].values())
 
         del stats["info_items"][:]
@@ -2034,11 +2036,8 @@ class MessageParser(object):
             stats["info_items"].append(("SMSes", smses_value))
         if stats["calls"]:
             calls_value  = "%d (%s)" % (stats["calls"],
-                           util.format_seconds(stats["callmaxdurations"]))
+                           util.format_seconds(stats["calldurations"]))
             stats["info_items"].append(("Calls", calls_value))
-        if stats["calldurations"]:
-            total  = util.format_seconds(stats["calldurations"])
-            stats["info_items"].append(("Total time spent in calls", total))
         if stats["transfers"]:
             files_value  = "%d (%s)" % (len(stats["transfers"]),
                            util.format_bytes(stats["bytes"]))
@@ -2166,44 +2165,6 @@ def import_contacts_file(filename):
     return contacts
 
 
-def get_avatar_pil(datadict, size=None, keep_aspect_ratio=True):
-    """
-    Returns a PIL.Image for the contact/account avatar, if any.
-
-    @param   datadict           row from Contacts or Accounts
-    @param   size               (width, height) to resize image to, if any
-    @param   keep_aspect_ratio  if True, keeps image aspect ratio is on
-                                resizing, filling the outside in white
-    """
-    result = None
-    raw = datadict.get("avatar_image") or datadict.get("profile_attachments")
-    if raw:
-        try:
-            data = fix_image_raw(raw)
-            imgparser = ImageFile.Parser(); imgparser.feed(data)
-            img = imgparser.close()
-
-            if size and list(size) != list(img.size):
-                size2, align_pos = list(size), None
-                if img.size[0] < size[0] and img.size[1] < size[1]:
-                    size2 = img.size
-                    align_pos = [(a - b) / 2 for a, b in zip(size, size2)]
-                elif keep_aspect_ratio:
-                    ratio = util.safedivf(img.size[0], img.size[1])
-                    size2[ratio > 1] *= ratio if ratio < 1 else 1 / ratio
-                    align_pos = [(a - b) / 2 for a, b in zip(size, size2)]
-                if img.size[0] > size[0] or img.size[1] > size[1]:
-                    img.thumbnail(tuple(map(int, size2)), Image.ANTIALIAS)
-                if align_pos:
-                    img, img0 = Image.new(img.mode, size, "white"), img
-                    img.paste(img0, tuple(map(int, align_pos)))
-            result = img
-        except Exception as e:
-            main.log("Error loading avatar image for %s (%s).",
-                     datadict["skypename"], e)
-    return result
-
-
 def get_avatar(datadict, size=None, keep_aspect_ratio=True):
     """
     Returns a wx.Bitmap for the contact/account avatar, if any.
@@ -2230,6 +2191,44 @@ def get_avatar(datadict, size=None, keep_aspect_ratio=True):
                 if align_pos:
                     img.Resize(size, align_pos, 255, 255, 255)
             result = wx.BitmapFromImage(img)
+        except Exception as e:
+            main.log("Error loading avatar image for %s (%s).",
+                     datadict["skypename"], e)
+    return result
+
+
+def get_avatar_pil(datadict, size=None, keep_aspect_ratio=True):
+    """
+    Returns a PIL.Image for the contact/account avatar, if any.
+
+    @param   datadict           row from Contacts or Accounts
+    @param   size               (width, height) to resize image to, if any
+    @param   keep_aspect_ratio  if True, keeps image aspect ratio is on
+                                resizing, filling the outside in white
+    """
+    result = None
+    raw = datadict.get("avatar_image") or datadict.get("profile_attachments")
+    if raw and Image:
+        try:
+            data = fix_image_raw(raw)
+            imgparser = ImageFile.Parser(); imgparser.feed(data)
+            img = imgparser.close()
+
+            if size and list(size) != list(img.size):
+                size2, align_pos = list(size), None
+                if img.size[0] < size[0] and img.size[1] < size[1]:
+                    size2 = img.size
+                    align_pos = [(a - b) / 2 for a, b in zip(size, size2)]
+                elif keep_aspect_ratio:
+                    ratio = util.safedivf(img.size[0], img.size[1])
+                    size2[ratio > 1] *= ratio if ratio < 1 else 1 / ratio
+                    align_pos = [(a - b) / 2 for a, b in zip(size, size2)]
+                if img.size[0] > size[0] or img.size[1] > size[1]:
+                    img.thumbnail(tuple(map(int, size2)), Image.ANTIALIAS)
+                if align_pos:
+                    img, img0 = Image.new(img.mode, size, "white"), img
+                    img.paste(img0, tuple(map(int, align_pos)))
+            result = img
         except Exception as e:
             main.log("Error loading avatar image for %s (%s).",
                      datadict["skypename"], e)
